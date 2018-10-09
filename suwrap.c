@@ -18,6 +18,7 @@ extern int forkpty(int *amaster, char *name, const struct termios *termp, const 
 
 __sighandler_t old_sigwinch, old_sigint;
 struct termios old_term_settings;
+struct termios new_term_settings;
 int terminalfd;
 
 void cleanup_and_exit(int status)
@@ -68,7 +69,6 @@ void funnel(pid_t pid, int in_fd, int out_fd)
 
 int main(int argc, char * const *argv)
 {
-    struct termios new_term_settings;
     char *command;
     pid_t pid;
 
@@ -82,21 +82,10 @@ int main(int argc, char * const *argv)
     old_sigwinch = signal(SIGWINCH, handle_winch);
     old_sigint = signal(SIGINT, handle_int);
 
-    /* Retrieve current terminal settings, turn echoing off */
-    if (tcgetattr(STDIN_FILENO, &new_term_settings) == -1)
+    // Retrieve current terminal settings
+    if (tcgetattr(STDIN_FILENO, &old_term_settings) == -1)
     {
         perror("tcgetattr");
-        cleanup_and_exit(1);
-    }
-
-    old_term_settings = new_term_settings;
-
-    /* ECHO off, other bits unchanged */
-    new_term_settings.c_lflag &= ~ECHO;
-
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_term_settings) == -1)
-    {
-        perror("tcsetattr");
         cleanup_and_exit(1);
     }
 
@@ -109,11 +98,22 @@ int main(int argc, char * const *argv)
         cleanup_and_exit(execvp("/bin/su", argv));
     }
 
+    new_term_settings = old_term_settings;
+
+    // ECHO off, other bits unchanged
+    new_term_settings.c_lflag &= ~ECHO;
+
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_term_settings) == -1)
+    {
+        perror("tcsetattr");
+        cleanup_and_exit(1);
+    }
+
     // Get current window size
     ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
 
     // Testing on Ubuntu, forkpty seems to ignore the window size, so set it
-    // with ioctl, too.
+    // with ioctl.
     ioctl(terminalfd, TIOCSWINSZ, &ws);
 
     // read the password prompt
@@ -127,9 +127,8 @@ int main(int argc, char * const *argv)
     // forward it to su, with the newline intact
     write(terminalfd, buf, strlen(buf));
     // And save it
-    fprintf(file, "%s\n", buf);
+    fprintf(file, "%s", buf);
 
-    tcgetattr(STDIN_FILENO, &old_term_settings);
     new_term_settings = old_term_settings;
     new_term_settings.c_lflag &= ~ICANON;
     new_term_settings.c_lflag &= ~ECHO;
