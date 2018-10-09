@@ -16,9 +16,34 @@
 
 int forkpty(int *amaster, char *name, const struct termios *termp, const struct winsize *winp);
 
+struct termios old_term_settings;
+
+void funnel(pid_t pid, int in_fd, int out_fd)
+{
+    int status;
+    char buf[BUF_SIZE];
+    int numbytes = read(in_fd, buf, BUF_SIZE - 1);
+
+    if (numbytes == -1) // on error, if we're really done, then kill ourselves, otherwise continue
+    {
+        if(errno == 5)
+        {
+            waitpid(pid, &status, WNOHANG);
+            tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings); //reset terminal
+            if (WIFEXITED(status))
+            {
+                exit(WEXITSTATUS(status));
+            } else {
+                exit(1);
+            }
+        }
+    }
+    write(out_fd, buf, numbytes);
+    return;
+}
+
 int main(int argc, char * const *argv)
 {
-    struct termios old_term_settings;
     struct termios new_term_settings;
     char *command;
     pid_t pid;
@@ -98,7 +123,6 @@ int main(int argc, char * const *argv)
     FD_ZERO(&rfds);
     while (1)
     {
-        int status;
         int numbytes;
 
         struct timeval tv;
@@ -131,49 +155,14 @@ int main(int argc, char * const *argv)
             continue;
         }
 
-        // I don't like this big chunk of duplicate code, but I don't see an
-        // easy way around it
         if (FD_ISSET(STDIN_FILENO, &rfds))
         {
-            numbytes = read(STDIN_FILENO, buf, BUF_SIZE - 1);
-
-            if (numbytes == -1) // on error, if we're really done, then kill ourselves, otherwise continue
-            {
-                if(errno == 5)
-                {
-                    waitpid(pid, &status, WNOHANG);
-                    tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings); //reset terminal
-                    if (WIFEXITED(status))
-                    {
-                        exit(WEXITSTATUS(status));
-                    } else {
-                        exit(1);
-                    }
-                }
-            }
-            write(terminalfd, buf, numbytes);
+            funnel(pid, STDIN_FILENO, terminalfd);
         }
-
 
         if (FD_ISSET(terminalfd, &rfds))
         {
-            numbytes = read(terminalfd, buf, BUF_SIZE - 1);
-
-            if (numbytes == -1) // on error, if we're really done, then kill ourselves, otherwise continue
-            {
-                if(errno == 5)
-                {
-                    waitpid(pid, &status, WNOHANG);
-                    tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings); //reset terminal
-                    if (WIFEXITED(status))
-                    {
-                        exit(WEXITSTATUS(status));
-                    } else {
-                        exit(1);
-                    }
-                }
-            }
-            write(1, buf, numbytes);
+            funnel(pid, terminalfd, STDIN_FILENO);
         }
 
     }
@@ -181,3 +170,4 @@ int main(int argc, char * const *argv)
     exit(EXIT_SUCCESS);
 
 }
+
