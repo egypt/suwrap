@@ -1,6 +1,10 @@
+LIBS=-lutil
+BINS=su
 
-all:
-	$(CC) suwrap.c -lutil -o su
+all: $(BINS)
+
+su: suwrap.c
+	$(CC) $< $(LIBS) -o $@
 
 clean:
-	rm su
+	rm $(BINS)
