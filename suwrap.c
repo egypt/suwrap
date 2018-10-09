@@ -16,6 +16,8 @@
 
 extern int forkpty(int *amaster, char *name, const struct termios *termp, const struct winsize *winp);
 
+// `man 2 signal` says this should be sighandler_t, but that's not defined on
+// my Ubuntu system
 __sighandler_t old_sigwinch, old_sigint;
 struct termios old_term_settings;
 struct termios new_term_settings;
